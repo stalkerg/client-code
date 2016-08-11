@@ -146,13 +146,13 @@ my (
     $aux_path,$trigger_exclude,$trigger_include,
     $secret,$keep_errs,$force_every,
     $make, $optional_steps,$use_vpath,
-    $tar_log_cmd, $using_msvc, $extra_config,
+    $tar_log_cmd, $using_msvc, $using_cmake, $extra_config,
     $make_jobs,$core_file_glob, $ccache_failure_remove
   )
   =@PGBuild::conf{
     qw(build_root target animal aux_path trigger_exclude
       trigger_include secret keep_error_builds force_every make optional_steps
-      use_vpath tar_log_cmd using_msvc extra_config make_jobs core_file_glob
+      use_vpath tar_log_cmd using_msvc using_cmake extra_config make_jobs core_file_glob
       ccache_failure_remove)
   };
 
@@ -680,20 +680,20 @@ make();
 make_check();
 
 # contrib is builtunder standard build step for msvc
-make_contrib() unless ($using_msvc);
+make_contrib() unless ($using_msvc || $using_cmake);
 
 make_testmodules()
-  if (!$using_msvc && ($branch eq 'HEAD' || $branch ge 'REL9_5'));
+  if (!$using_msvc && !$using_cmake && ($branch eq 'HEAD' || $branch ge 'REL9_5'));
 
 make_doc() if (check_optional_step('build_docs'));
 
 make_install();
 
 # contrib is installed under standard install for msvc
-make_contrib_install() unless ($using_msvc);
+make_contrib_install() unless ($using_msvc || $using_cmake);
 
 make_testmodules_install()
-  if (!$using_msvc && ($branch eq 'HEAD' || $branch ge 'REL9_5'));
+  if (!$using_msvc && !$using_cmake && ($branch eq 'HEAD' || $branch ge 'REL9_5'));
 
 process_module_hooks('configure');
 
@@ -803,7 +803,7 @@ foreach my $locale (@locales)
 }
 
 # ecpg checks are not supported in 8.1 and earlier
-if (($branch eq 'HEAD' || $branch gt 'REL8_2') && step_wanted('ecpg-check'))
+if (($branch eq 'HEAD' || $branch gt 'REL8_2') && step_wanted('ecpg-check') && !$using_cmake)
 {
     print time_str(),"running make ecpg check ...\n" if $verbose;
 
@@ -981,18 +981,25 @@ sub make
     print time_str(),"running make ...\n" if $verbose;
 
     my (@makeout);
-    unless ($using_msvc)
+    if($using_msvc)
+    {
+        chdir "$pgsql/src/tools/msvc";
+        @makeout = `perl build.pl 2>&1`;
+        chdir $branch_root; 
+    }
+    elsif($using_cmake)
+    {
+        my $make_cmd = $make;
+        $make_cmd = "$make -j $make_jobs"
+          if ($make_jobs > 1 && ($branch eq 'HEAD' || $branch ge 'REL9_1'));
+        @makeout = `cd $pgsql/build && $make_cmd 2>&1`;
+    }
+    else
     {
         my $make_cmd = $make;
         $make_cmd = "$make -j $make_jobs"
           if ($make_jobs > 1 && ($branch eq 'HEAD' || $branch ge 'REL9_1'));
         @makeout = `cd $pgsql && $make_cmd 2>&1`;
-    }
-    else
-    {
-        chdir "$pgsql/src/tools/msvc";
-        @makeout = `perl build.pl 2>&1`;
-        chdir $branch_root;
     }
     my $status = $? >>8;
     writelog('make',\@makeout);
@@ -1030,15 +1037,19 @@ sub make_install
     print time_str(),"running make install ...\n" if $verbose;
 
     my @makeout;
-    unless ($using_msvc)
-    {
-        @makeout = `cd $pgsql && $make install 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @makeout = `perl install.pl "$installdir" 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        @makeout = `cd $pgsql/build && $make install 2>&1`;
+    }
+    else
+    {
+        @makeout = `cd $pgsql && $make install 2>&1`;
     }
     my $status = $? >>8;
     writelog('make-install',\@makeout);
@@ -1316,15 +1327,19 @@ sub make_install_check
     print time_str(),"running make installcheck ($locale)...\n" if $verbose;
 
     my @checklog;
-    unless ($using_msvc)
-    {
-        @checklog = `cd $pgsql/src/test/regress && $make installcheck 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @checklog = `perl vcregress.pl installcheck 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        @checklog = `cd $pgsql/build && $make installcheck 2>&1`;
+    }
+    else
+    {
+       @checklog = `cd $pgsql/src/test/regress && $make installcheck 2>&1`;
     }
     my $status = $? >>8;
     my @logfiles =
@@ -1359,16 +1374,21 @@ sub make_contrib_install_check
     my $locale = shift;
     return unless step_wanted('contrib-install-check');
     my @checklog;
-    unless ($using_msvc)
-    {
-        @checklog =
-          `cd $pgsql/contrib && $make USE_MODULE_DB=1 installcheck 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @checklog = `perl vcregress.pl contribcheck 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        @checklog =
+          `cd $pgsql/build && $make USE_MODULE_DB=1 contrib_check 2>&1`;
+    }
+    else
+    {
+        @checklog =
+          `cd $pgsql/contrib && $make USE_MODULE_DB=1 installcheck 2>&1`;
     }
     my $status = $? >>8;
     my @logs = glob("$pgsql/contrib/*/regression.diffs");
@@ -1403,16 +1423,21 @@ sub make_testmodules_install_check
     my $locale = shift;
     return unless step_wanted('testmodules-install-check');
     my @checklog;
-    unless ($using_msvc)
-    {
-        @checklog =
-`cd $pgsql/src/test/modules && $make USE_MODULE_DB=1 installcheck 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @checklog = `perl vcregress.pl modulescheck 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        #@checklog =
+#`cd $pgsql/src/test/modules && $make USE_MODULE_DB=1 installcheck 2>&1`;
+    }
+    else
+    {
+        @checklog =
+`cd $pgsql/src/test/modules && $make USE_MODULE_DB=1 installcheck 2>&1`;
     }
     my $status = $? >>8;
     my @logs = glob("$pgsql/src/test/modules/*/regression.diffs");
@@ -1495,17 +1520,23 @@ sub make_isolation_check
     my $locale = shift;
     return unless step_wanted('isolation-check');
     my @makeout;
-    unless ($using_msvc)
-    {
-        my $cmd =
-          "cd $pgsql/src/test/isolation && $make NO_LOCALE=1 installcheck";
-        @makeout = `$cmd 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @makeout = `perl vcregress.pl isolationcheck 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        my $cmd =
+          "cd $pgsql/build && $make NO_LOCALE=1 isolation_check";
+        @makeout = `$cmd 2>&1`;
+    }
+    else
+    {
+        my $cmd =
+          "cd $pgsql/src/test/isolation && $make NO_LOCALE=1 installcheck";
+        @makeout = `$cmd 2>&1`;
     }
 
     my $status = $? >>8;
@@ -1613,15 +1644,19 @@ sub make_check
     print time_str(),"running make check ...\n" if $verbose;
 
     my @makeout;
-    unless ($using_msvc)
-    {
-        @makeout =`cd $pgsql/src/test/regress && $make NO_LOCALE=1 check 2>&1`;
-    }
-    else
+    if ($using_msvc)
     {
         chdir "$pgsql/src/tools/msvc";
         @makeout = `perl vcregress.pl check 2>&1`;
         chdir $branch_root;
+    }
+    elsif ($using_cmake)
+    {
+        @makeout =`cd $pgsql/build && $make NO_LOCALE=1 check 2>&1`;
+    }
+    else
+    {
+        @makeout =`cd $pgsql/src/test/regress && $make NO_LOCALE=1 check 2>&1`;
     }
 
     my $status = $? >>8;
@@ -1910,21 +1945,38 @@ sub configure
             push(@quoted_opts,"'$c_opt'");
         }
     }
+    print "@quoted_opts\n";
 
-    my $confstr =
-      join(" ",@quoted_opts,"--prefix=$installdir","--with-pgport=$buildport");
+    my $confstr;
+    if ($using_cmake)
+    {
+        $confstr = join(" ",@quoted_opts,"-DCMAKE_INSTALL_PREFIX=$installdir","-DPGPORT=$buildport");
+    }
+    else
+    {
+        $confstr = join(" ",@quoted_opts,"--prefix=$installdir","--with-pgport=$buildport");
+    }
 
     my $env = $PGBuild::conf{config_env};
 
     my $envstr = "";
+    my $conf_path;
+    my @confout;
     while (my ($key,$val) = each %$env)
     {
         $envstr .= "$key='$val' ";
     }
 
-    my $conf_path = $use_vpath ? "../pgsql/configure" : "./configure";
-
-    my @confout = `cd $pgsql && $envstr $conf_path $confstr 2>&1`;
+    if ($using_cmake)
+    {
+        $conf_path = "cmake ..";
+        @confout = `mkdir $pgsql/build && cd $pgsql/build && $envstr $conf_path $confstr 2>&1`;
+    }
+    else
+    {
+        $conf_path = $use_vpath ? "../pgsql/configure" : "./configure";
+        @confout = `cd $pgsql && $envstr $conf_path $confstr 2>&1`;
+    }
 
     my $status = $? >> 8;
 
@@ -1935,14 +1987,17 @@ sub configure
 
     my ($handle,@config);
 
-    if (open($handle,"$pgsql/config.log"))
+    if (!$using_cmake)
     {
-        while(<$handle>)
+        if (open($handle,"$pgsql/config.log"))
         {
-            push(@config,$_);
+            while(<$handle>)
+            {
+                push(@config,$_);
+            }
+            close($handle);
+            writelog('config',\@config);
         }
-        close($handle);
-        writelog('config',\@config);
     }
 
     if ($status)

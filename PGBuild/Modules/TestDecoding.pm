@@ -57,6 +57,10 @@ sub check
         #        @checklog = `perl vcregress.pl upgradecheck 2>&1`;
         #        chdir "$self->{buildroot}/$self->{pgbranch}";
     }
+    elsif ($self->{bfconf}->{using_cmake})
+    {
+
+    }
     else
     {
         my $cmd = "cd $self->{pgsql}/contrib/test_decoding && $make check";
